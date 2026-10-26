@@ -1,4 +1,4 @@
-//! WYSIWYG Markdown Editor Widget
+﻿//! WYSIWYG Markdown Editor Widget
 //!
 //! This module provides a WYSIWYG (What You See Is What You Get) markdown editor
 //! that renders markdown as editable egui widgets, allowing users to edit content
@@ -61,9 +61,9 @@ use crate::markdown::parser::{
     CalloutType, HeadingLevel, ListType, MarkdownNode, MarkdownNodeType,
 };
 use crate::markdown::widgets::{
-    build_inline_markdown_layout_job, map_displayed_to_raw, CodeBlockData, EditableCodeBlock,
-    EditableTable, MermaidBlock, MermaidBlockData, RenderedLinkState, RenderedLinkWidget,
-    TableData, TableEditState, WidgetColors,
+    build_inline_markdown_layout_job_skipping_images, map_displayed_to_raw_skipping_images,
+    CodeBlockData, EditableCodeBlock, EditableTable, MermaidBlock, MermaidBlockData,
+    RenderedLinkState, RenderedLinkWidget, TableData, TableEditState, WidgetColors,
 };
 use crate::ui::{render_nav_buttons, NavAction};
 use eframe::egui::{
@@ -2676,7 +2676,7 @@ fn enter_formatted_edit_on_display_click(
             0.0,
             layout_wrap_width,
         );
-        map_displayed_to_raw(displayed_idx, &raw_text).min(raw_text.chars().count())
+        map_displayed_to_raw_skipping_images(displayed_idx, &raw_text).min(raw_text.chars().count())
     });
 
     session_switch_to_ui(
@@ -3090,6 +3090,127 @@ fn has_non_image_inline_content(node: &MarkdownNode) -> bool {
     }
 }
 
+/// Shared non-editing display renderer for formatted paragraphs and list items.
+/// Renders the inline text galley (when non-image content exists) and any embedded `Image` nodes.
+#[allow(clippy::too_many_arguments)]
+fn render_formatted_display_with_images(
+    ui: &mut Ui,
+    node: &MarkdownNode,
+    block_ref: BlockRef,
+    session: &mut RenderedEditSession,
+    source: &mut String,
+    edit_state: &mut EditState,
+    colors: &EditorColors,
+    font_size: f32,
+    editor_font: &EditorFont,
+    base_indent: f32,
+    cjk_indent: f32,
+    available_width: f32,
+) {
+    let mut images = Vec::new();
+    collect_image_nodes(node, &mut images);
+    let show_text = images.is_empty() || has_non_image_inline_content(node);
+
+    if show_text {
+        let raw_display = session
+            .blocks
+            .get(&block_ref)
+            .map(|s| s.text.as_str())
+            .unwrap_or("");
+        let (display_response, layout_wrap_w) = if base_indent > 0.0 || cjk_indent > 0.0 {
+            ui.horizontal(|ui| {
+                ui.set_max_width(available_width);
+                ui.add_space(base_indent);
+
+                if cjk_indent > 0.0 {
+                    ui.add_space(cjk_indent);
+                }
+                let wrap_w = ui.available_width();
+                (
+                    show_formatted_block_galley_display(
+                        ui,
+                        raw_display,
+                        font_size,
+                        editor_font,
+                        colors,
+                        wrap_w,
+                    ),
+                    wrap_w,
+                )
+            })
+            .inner
+        } else {
+            let wrap_w = ui.available_width();
+            (
+                show_formatted_block_galley_display(
+                    ui,
+                    raw_display,
+                    font_size,
+                    editor_font,
+                    colors,
+                    wrap_w,
+                ),
+                wrap_w,
+            )
+        };
+
+        let sense_id = block_ref.widget_id(ui).with("display_sense");
+        let sense_response =
+            ui.interact(display_response.rect, sense_id, egui::Sense::click());
+
+        if sense_response.clicked() {
+            let displayed_plaintext = node.text_content();
+            enter_formatted_edit_on_display_click(
+                ui,
+                block_ref,
+                session,
+                source,
+                edit_state,
+                display_response.rect,
+                &displayed_plaintext,
+                font_size,
+                editor_font,
+                layout_wrap_w,
+            );
+        }
+        if sense_response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
+    }
+
+    for (idx, (img_node, url, title)) in images.into_iter().enumerate() {
+        let img_response = if base_indent > 0.0 {
+            ui.horizontal(|ui| {
+                ui.set_max_width(available_width);
+                ui.add_space(base_indent);
+                render_image(ui, img_node, colors, font_size, url, title)
+            })
+            .inner
+        } else {
+            render_image(ui, img_node, colors, font_size, url, title)
+        };
+        let sense_id = block_ref.widget_id(ui).with("img_sense").with(idx);
+        let sense_response = ui.interact(img_response.rect, sense_id, egui::Sense::click());
+        if sense_response.clicked() {
+            enter_formatted_edit_on_display_click(
+                ui,
+                block_ref,
+                session,
+                source,
+                edit_state,
+                img_response.rect,
+                "",
+                font_size,
+                editor_font,
+                available_width,
+            );
+        }
+        if sense_response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+}
+
 /// Render a paragraph with structural key handling (Enter splits paragraph).
 fn render_paragraph_with_structural_keys(
     ui: &mut Ui,
@@ -3171,92 +3292,20 @@ fn render_paragraph_with_structural_keys(
                 edit_state.set_focus(node_id, selection);
             }
         } else {
-            let mut images = Vec::new();
-            collect_image_nodes(node, &mut images);
-            let show_text = images.is_empty() || has_non_image_inline_content(node);
-
-            if show_text {
-                let raw_display = session
-                    .blocks
-                    .get(&block_ref)
-                    .map(|s| s.text.as_str())
-                    .unwrap_or("");
-                let (display_response, layout_wrap_w) = ui
-                    .horizontal(|ui| {
-                        ui.set_max_width(available_width);
-                        ui.add_space(base_indent);
-
-                        if cjk_indent > 0.0 {
-                            ui.add_space(cjk_indent);
-                        }
-                        let wrap_w = ui.available_width();
-                        (
-                            show_formatted_block_galley_display(
-                                ui,
-                                raw_display,
-                                font_size,
-                                editor_font,
-                                colors,
-                                wrap_w,
-                            ),
-                            wrap_w,
-                        )
-                    })
-                    .inner;
-
-                let sense_id = block_ref.widget_id(ui).with("display_sense");
-                let sense_response =
-                    ui.interact(display_response.rect, sense_id, egui::Sense::click());
-
-                if sense_response.clicked() {
-                    let displayed_plaintext = node.text_content();
-                    enter_formatted_edit_on_display_click(
-                        ui,
-                        block_ref,
-                        session,
-                        source,
-                        edit_state,
-                        display_response.rect,
-                        &displayed_plaintext,
-                        font_size,
-                        editor_font,
-                        layout_wrap_w,
-                    );
-                }
-                if sense_response.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-                }
-            }
-
-            for (idx, (img_node, url, title)) in images.into_iter().enumerate() {
-                let img_response = ui
-                    .horizontal(|ui| {
-                        ui.set_max_width(available_width);
-                        ui.add_space(base_indent);
-                        render_image(ui, img_node, colors, font_size, url, title)
-                    })
-                    .inner;
-                let sense_id = block_ref.widget_id(ui).with("img_sense").with(idx);
-                let sense_response =
-                    ui.interact(img_response.rect, sense_id, egui::Sense::click());
-                if sense_response.clicked() {
-                    enter_formatted_edit_on_display_click(
-                        ui,
-                        block_ref,
-                        session,
-                        source,
-                        edit_state,
-                        img_response.rect,
-                        "",
-                        font_size,
-                        editor_font,
-                        available_width,
-                    );
-                }
-                if sense_response.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-            }
+            render_formatted_display_with_images(
+                ui,
+                node,
+                block_ref,
+                session,
+                source,
+                edit_state,
+                colors,
+                font_size,
+                editor_font,
+                base_indent,
+                cjk_indent,
+                available_width,
+            );
         }
     } else {
         // Simple text-only paragraph — session-backed buffer (preserves trailing spaces via extract).
@@ -3874,75 +3923,22 @@ fn render_list_item_with_structural_keys(
                         edit_state.set_focus(node_id, selection);
                     }
                 } else {
-                    let mut images = Vec::new();
-                    collect_image_nodes(para, &mut images);
-                    let show_text = images.is_empty() || has_non_image_inline_content(para);
+                    let item_width = ui.available_width();
                     ui.vertical(|ui| {
-                        if show_text {
-                            let raw_display = session
-                                .blocks
-                                .get(&block_ref)
-                                .map(|s| s.text.as_str())
-                                .unwrap_or("");
-                            let layout_wrap_w = ui.available_width();
-                            let display_response = show_formatted_block_galley_display(
-                                ui,
-                                raw_display,
-                                font_size,
-                                editor_font,
-                                colors,
-                                layout_wrap_w,
-                            );
-
-                            let sense_id = block_ref.widget_id(ui).with("display_sense");
-                            let sense_response =
-                                ui.interact(display_response.rect, sense_id, egui::Sense::click());
-
-                            if sense_response.clicked() {
-                                let displayed_plaintext = para.text_content();
-                                enter_formatted_edit_on_display_click(
-                                    ui,
-                                    block_ref,
-                                    session,
-                                    source,
-                                    edit_state,
-                                    display_response.rect,
-                                    &displayed_plaintext,
-                                    font_size,
-                                    editor_font,
-                                    layout_wrap_w,
-                                );
-                            }
-                            if sense_response.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-                            }
-                        }
-
-                        for (idx, (img_node, url, title)) in images.into_iter().enumerate() {
-                            let layout_wrap_w = ui.available_width();
-                            let img_response =
-                                render_image(ui, img_node, colors, font_size, url, title);
-                            let sense_id = block_ref.widget_id(ui).with("img_sense").with(idx);
-                            let sense_response =
-                                ui.interact(img_response.rect, sense_id, egui::Sense::click());
-                            if sense_response.clicked() {
-                                enter_formatted_edit_on_display_click(
-                                    ui,
-                                    block_ref,
-                                    session,
-                                    source,
-                                    edit_state,
-                                    img_response.rect,
-                                    "",
-                                    font_size,
-                                    editor_font,
-                                    layout_wrap_w,
-                                );
-                            }
-                            if sense_response.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                        }
+                        render_formatted_display_with_images(
+                            ui,
+                            para,
+                            block_ref,
+                            session,
+                            source,
+                            edit_state,
+                            colors,
+                            font_size,
+                            editor_font,
+                            0.0,
+                            0.0,
+                            item_width,
+                        );
                     });
                 }
             }
@@ -4078,92 +4074,20 @@ fn render_paragraph(
                 edit_state.set_focus(node_id, selection);
             }
         } else {
-            let mut images = Vec::new();
-            collect_image_nodes(node, &mut images);
-            let show_text = images.is_empty() || has_non_image_inline_content(node);
-
-            if show_text {
-                let raw_display = session
-                    .blocks
-                    .get(&block_ref)
-                    .map(|s| s.text.as_str())
-                    .unwrap_or("");
-                let (display_response, layout_wrap_w) = ui
-                    .horizontal(|ui| {
-                        ui.set_max_width(available_width);
-                        ui.add_space(base_indent);
-
-                        if cjk_indent > 0.0 {
-                            ui.add_space(cjk_indent);
-                        }
-                        let wrap_w = ui.available_width();
-                        (
-                            show_formatted_block_galley_display(
-                                ui,
-                                raw_display,
-                                font_size,
-                                editor_font,
-                                colors,
-                                wrap_w,
-                            ),
-                            wrap_w,
-                        )
-                    })
-                    .inner;
-
-                let sense_id = block_ref.widget_id(ui).with("display_sense");
-                let sense_response =
-                    ui.interact(display_response.rect, sense_id, egui::Sense::click());
-
-                if sense_response.clicked() {
-                    let displayed_plaintext = node.text_content();
-                    enter_formatted_edit_on_display_click(
-                        ui,
-                        block_ref,
-                        session,
-                        source,
-                        edit_state,
-                        display_response.rect,
-                        &displayed_plaintext,
-                        font_size,
-                        editor_font,
-                        layout_wrap_w,
-                    );
-                }
-                if sense_response.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-                }
-            }
-
-            for (idx, (img_node, url, title)) in images.into_iter().enumerate() {
-                let img_response = ui
-                    .horizontal(|ui| {
-                        ui.set_max_width(available_width);
-                        ui.add_space(base_indent);
-                        render_image(ui, img_node, colors, font_size, url, title)
-                    })
-                    .inner;
-                let sense_id = block_ref.widget_id(ui).with("img_sense").with(idx);
-                let sense_response =
-                    ui.interact(img_response.rect, sense_id, egui::Sense::click());
-                if sense_response.clicked() {
-                    enter_formatted_edit_on_display_click(
-                        ui,
-                        block_ref,
-                        session,
-                        source,
-                        edit_state,
-                        img_response.rect,
-                        "",
-                        font_size,
-                        editor_font,
-                        available_width,
-                    );
-                }
-                if sense_response.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-            }
+            render_formatted_display_with_images(
+                ui,
+                node,
+                block_ref,
+                session,
+                source,
+                edit_state,
+                colors,
+                font_size,
+                editor_font,
+                base_indent,
+                cjk_indent,
+                available_width,
+            );
         }
     } else {
         // Simple text-only paragraph — session-backed buffer.
@@ -4273,7 +4197,7 @@ fn show_formatted_block_galley_display(
     colors: &EditorColors,
     wrap_width: f32,
 ) -> Response {
-    let job = build_inline_markdown_layout_job(
+    let job = build_inline_markdown_layout_job_skipping_images(
         raw_text,
         font_size,
         editor_font,
@@ -4333,7 +4257,7 @@ fn compute_displayed_cursor_index(
     // sections use the same font metrics as the painted display (table cells use
     // the same approach). Plain text (headings, etc.) keeps a single-font galley.
     let galley = if raw_text != displayed_text {
-        let job = build_inline_markdown_layout_job(
+        let job = build_inline_markdown_layout_job_skipping_images(
             raw_text,
             font_size,
             editor_font,
@@ -5269,75 +5193,22 @@ fn render_list_item(
                         edit_state.set_focus(node_id, selection);
                     }
                 } else {
-                    let mut images = Vec::new();
-                    collect_image_nodes(para, &mut images);
-                    let show_text = images.is_empty() || has_non_image_inline_content(para);
+                    let item_width = ui.available_width();
                     ui.vertical(|ui| {
-                        if show_text {
-                            let raw_display = session
-                                .blocks
-                                .get(&block_ref)
-                                .map(|s| s.text.as_str())
-                                .unwrap_or("");
-                            let layout_wrap_w = ui.available_width();
-                            let display_response = show_formatted_block_galley_display(
-                                ui,
-                                raw_display,
-                                font_size,
-                                editor_font,
-                                colors,
-                                layout_wrap_w,
-                            );
-
-                            let sense_id = block_ref.widget_id(ui).with("display_sense");
-                            let sense_response =
-                                ui.interact(display_response.rect, sense_id, egui::Sense::click());
-
-                            if sense_response.clicked() {
-                                let displayed_plaintext = para.text_content();
-                                enter_formatted_edit_on_display_click(
-                                    ui,
-                                    block_ref,
-                                    session,
-                                    source,
-                                    edit_state,
-                                    display_response.rect,
-                                    &displayed_plaintext,
-                                    font_size,
-                                    editor_font,
-                                    layout_wrap_w,
-                                );
-                            }
-                            if sense_response.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-                            }
-                        }
-
-                        for (idx, (img_node, url, title)) in images.into_iter().enumerate() {
-                            let layout_wrap_w = ui.available_width();
-                            let img_response =
-                                render_image(ui, img_node, colors, font_size, url, title);
-                            let sense_id = block_ref.widget_id(ui).with("img_sense").with(idx);
-                            let sense_response =
-                                ui.interact(img_response.rect, sense_id, egui::Sense::click());
-                            if sense_response.clicked() {
-                                enter_formatted_edit_on_display_click(
-                                    ui,
-                                    block_ref,
-                                    session,
-                                    source,
-                                    edit_state,
-                                    img_response.rect,
-                                    "",
-                                    font_size,
-                                    editor_font,
-                                    layout_wrap_w,
-                                );
-                            }
-                            if sense_response.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                        }
+                        render_formatted_display_with_images(
+                            ui,
+                            para,
+                            block_ref,
+                            session,
+                            source,
+                            edit_state,
+                            colors,
+                            font_size,
+                            editor_font,
+                            0.0,
+                            0.0,
+                            item_width,
+                        );
                     });
                 }
             }
@@ -5958,11 +5829,14 @@ fn resolve_image_path(
         return None;
     }
 
-    // Strip leading file:// protocol if present
-    let path_str = url
-        .strip_prefix("file:///")
-        .or_else(|| url.strip_prefix("file://"))
-        .unwrap_or(url);
+    // Strip leading file:// protocol if present.
+    // On Windows, `file:///C:/x` leaves `/C:/x`: drop the leading slash only when a drive letter follows.
+    let mut path_str = url.strip_prefix("file://").unwrap_or(url);
+    let b = path_str.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        path_str = &path_str[1..];
+    }
+
     let decoded = if path_str.contains('%') {
         Some(decode_percent_encoded(path_str))
     } else {

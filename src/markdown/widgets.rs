@@ -1012,6 +1012,49 @@ pub(crate) fn build_inline_markdown_layout_job(
     code_bg: Color32,
     wrap_width: f32,
 ) -> egui::text::LayoutJob {
+    build_inline_markdown_layout_job_with_options(
+        text,
+        font_size,
+        editor_font,
+        text_color,
+        link_color,
+        code_bg,
+        wrap_width,
+        false,
+    )
+}
+
+pub(crate) fn build_inline_markdown_layout_job_skipping_images(
+    text: &str,
+    font_size: f32,
+    editor_font: &EditorFont,
+    text_color: Color32,
+    link_color: Color32,
+    code_bg: Color32,
+    wrap_width: f32,
+) -> egui::text::LayoutJob {
+    build_inline_markdown_layout_job_with_options(
+        text,
+        font_size,
+        editor_font,
+        text_color,
+        link_color,
+        code_bg,
+        wrap_width,
+        true,
+    )
+}
+
+fn build_inline_markdown_layout_job_with_options(
+    text: &str,
+    font_size: f32,
+    editor_font: &EditorFont,
+    text_color: Color32,
+    link_color: Color32,
+    code_bg: Color32,
+    wrap_width: f32,
+    skip_images: bool,
+) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrap_width;
     parse_inline_markdown(
@@ -1025,11 +1068,13 @@ pub(crate) fn build_inline_markdown_layout_job(
         text_color,
         link_color,
         code_bg,
+        skip_images,
     );
     if job.sections.is_empty() {
         let family = get_styled_font_family(false, false, editor_font);
+        let fallback = if skip_images { "" } else { text };
         job.append(
-            "",
+            fallback,
             0.0,
             egui::text::TextFormat {
                 font_id: FontId::new(font_size, family),
@@ -1089,7 +1134,39 @@ fn table_cell_raw_cursor_at_click(
 
 /// Maps a cursor position in displayed text (without formatting markers) to the
 /// corresponding position in raw markdown text (with formatting markers).
+fn is_escaped_byte(bytes: &[u8], idx: usize) -> bool {
+    let mut backslashes = 0usize;
+    let mut k = idx;
+    while k > 0 && bytes[k - 1] == b'\\' {
+        backslashes += 1;
+        k -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+fn is_escaped_char(chars: &[char], idx: usize) -> bool {
+    let mut backslashes = 0usize;
+    let mut k = idx;
+    while k > 0 && chars[k - 1] == '\\' {
+        backslashes += 1;
+        k -= 1;
+    }
+    backslashes % 2 == 1
+}
+
 pub(crate) fn map_displayed_to_raw(displayed_idx: usize, raw_text: &str) -> usize {
+    map_displayed_to_raw_with_options(displayed_idx, raw_text, false)
+}
+
+pub(crate) fn map_displayed_to_raw_skipping_images(displayed_idx: usize, raw_text: &str) -> usize {
+    map_displayed_to_raw_with_options(displayed_idx, raw_text, true)
+}
+
+fn map_displayed_to_raw_with_options(
+    displayed_idx: usize,
+    raw_text: &str,
+    skip_images: bool,
+) -> usize {
     let chars: Vec<char> = raw_text.chars().collect();
     let mut raw_pos = 0;
     let mut displayed_pos = 0;
@@ -1101,6 +1178,16 @@ pub(crate) fn map_displayed_to_raw(displayed_idx: usize, raw_text: &str) -> usiz
         {
             raw_pos += 2;
             continue;
+        }
+
+        if skip_images
+            && remaining.starts_with("![")
+            && !is_escaped_char(&chars, raw_pos)
+        {
+            if let Some((_, consumed)) = parse_markdown_link_span(&remaining[1..]) {
+                raw_pos += 1 + remaining[1..1 + consumed].chars().count();
+                continue;
+            }
         }
 
         if chars[raw_pos] == '[' && raw_pos + 1 < chars.len() && chars[raw_pos + 1] == '[' {
@@ -1130,13 +1217,6 @@ pub(crate) fn map_displayed_to_raw(displayed_idx: usize, raw_text: &str) -> usiz
                 raw_pos += 1;
             }
             continue;
-        }
-
-        if remaining.starts_with("![") {
-            if let Some((_, consumed)) = parse_markdown_link_span(&remaining[1..]) {
-                raw_pos += 1 + remaining[1..1 + consumed].chars().count();
-                continue;
-            }
         }
 
         if chars[raw_pos] == '[' {
@@ -1213,6 +1293,7 @@ fn build_cell_layout_job_with_base_bold(
         text_color,
         text_color,
         code_bg,
+        false,
     );
     if job.sections.is_empty() {
         let family = get_styled_font_family(true, false, editor_font);
@@ -1314,6 +1395,7 @@ fn parse_inline_markdown(
     text_color: Color32,
     link_color: Color32,
     code_bg: Color32,
+    skip_images: bool,
 ) {
     let bytes = text.as_bytes();
     let len = bytes.len();
@@ -1349,8 +1431,13 @@ fn parse_inline_markdown(
                 plain_start = i;
                 continue;
             }
-        } else if i + 1 < len && bytes[i] == b'!' && bytes[i + 1] == b'[' {
-            // Image syntax `![alt](url)` is rendered as an image widget, not inline text.
+        } else if skip_images
+            && i + 1 < len
+            && bytes[i] == b'!'
+            && bytes[i + 1] == b'['
+            && !is_escaped_byte(bytes, i)
+        {
+            // Image syntax `![alt](url)` is rendered as an image widget in paragraphs/lists.
             if let Some((_, consumed)) = parse_markdown_link_span(&text[i + 1..]) {
                 flush_plain(
                     text,
@@ -1424,6 +1511,7 @@ fn parse_inline_markdown(
                     text_color,
                     link_color,
                     code_bg,
+                    skip_images,
                 );
                 i = i + 3 + close + 3;
                 plain_start = i;
@@ -1456,6 +1544,7 @@ fn parse_inline_markdown(
                     text_color,
                     link_color,
                     code_bg,
+                    skip_images,
                 );
                 i = i + 2 + close + 2;
                 plain_start = i;
@@ -1488,6 +1577,7 @@ fn parse_inline_markdown(
                     text_color,
                     link_color,
                     code_bg,
+                    skip_images,
                 );
                 i = i + 2 + close + 2;
                 plain_start = i;
@@ -1551,6 +1641,7 @@ fn parse_inline_markdown(
                     text_color,
                     link_color,
                     code_bg,
+                    skip_images,
                 );
                 i = i + 1 + close + 1;
                 plain_start = i;
@@ -6471,8 +6562,8 @@ mod tests {
     }
 
     #[test]
-    fn test_inline_markdown_skips_image_syntax_in_text_galley() {
-        let job = build_inline_markdown_layout_job(
+    fn test_inline_markdown_skips_image_syntax_in_block_galley_but_keeps_escaped_and_tables() {
+        let job = build_inline_markdown_layout_job_skipping_images(
             "![](folder/image.png)",
             14.0,
             &EditorFont::default(),
@@ -6483,7 +6574,7 @@ mod tests {
         );
         assert_eq!(job.text, "");
 
-        let mixed = build_inline_markdown_layout_job(
+        let mixed = build_inline_markdown_layout_job_skipping_images(
             "Before ![Alt](folder/image.png) after",
             14.0,
             &EditorFont::default(),
@@ -6493,5 +6584,27 @@ mod tests {
             400.0,
         );
         assert_eq!(mixed.text, "Before  after");
+
+        let escaped = build_inline_markdown_layout_job_skipping_images(
+            r"\![Alt](folder/image.png)",
+            14.0,
+            &EditorFont::default(),
+            Color32::WHITE,
+            Color32::BLUE,
+            Color32::BLACK,
+            400.0,
+        );
+        assert_eq!(escaped.text, r"\!Alt");
+
+        let table_cell = build_inline_markdown_layout_job(
+            "![Alt](folder/image.png)",
+            14.0,
+            &EditorFont::default(),
+            Color32::WHITE,
+            Color32::BLUE,
+            Color32::BLACK,
+            400.0,
+        );
+        assert_eq!(table_cell.text, "!Alt");
     }
 }
