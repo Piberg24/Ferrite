@@ -1029,7 +1029,7 @@ pub(crate) fn build_inline_markdown_layout_job(
     if job.sections.is_empty() {
         let family = get_styled_font_family(false, false, editor_font);
         job.append(
-            text,
+            "",
             0.0,
             egui::text::TextFormat {
                 font_id: FontId::new(font_size, family),
@@ -1130,6 +1130,13 @@ pub(crate) fn map_displayed_to_raw(displayed_idx: usize, raw_text: &str) -> usiz
                 raw_pos += 1;
             }
             continue;
+        }
+
+        if remaining.starts_with("![") {
+            if let Some((_, consumed)) = parse_markdown_link_span(&remaining[1..]) {
+                raw_pos += 1 + remaining[1..1 + consumed].chars().count();
+                continue;
+            }
         }
 
         if chars[raw_pos] == '[' {
@@ -1339,6 +1346,25 @@ fn parse_inline_markdown(
                     link_color,
                 );
                 i += consumed;
+                plain_start = i;
+                continue;
+            }
+        } else if i + 1 < len && bytes[i] == b'!' && bytes[i + 1] == b'[' {
+            // Image syntax `![alt](url)` is rendered as an image widget, not inline text.
+            if let Some((_, consumed)) = parse_markdown_link_span(&text[i + 1..]) {
+                flush_plain(
+                    text,
+                    plain_start,
+                    i,
+                    job,
+                    bold,
+                    italic,
+                    strike,
+                    font_size,
+                    editor_font,
+                    text_color,
+                );
+                i += 1 + consumed;
                 plain_start = i;
                 continue;
             }
@@ -6442,5 +6468,30 @@ mod tests {
         };
         assert!(output.changed);
         assert_eq!(output.diagram_type, MermaidDiagramType::Flowchart);
+    }
+
+    #[test]
+    fn test_inline_markdown_skips_image_syntax_in_text_galley() {
+        let job = build_inline_markdown_layout_job(
+            "![](folder/image.png)",
+            14.0,
+            &EditorFont::default(),
+            Color32::WHITE,
+            Color32::BLUE,
+            Color32::BLACK,
+            400.0,
+        );
+        assert_eq!(job.text, "");
+
+        let mixed = build_inline_markdown_layout_job(
+            "Before ![Alt](folder/image.png) after",
+            14.0,
+            &EditorFont::default(),
+            Color32::WHITE,
+            Color32::BLUE,
+            Color32::BLACK,
+            400.0,
+        );
+        assert_eq!(mixed.text, "Before  after");
     }
 }
